@@ -23,8 +23,10 @@
     font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
   h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+  .toggle input { flex: none; min-width: 0; margin: 0; }
   .sub { color: var(--muted); font-size: 13px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
   .banner { padding: 14px 16px; margin-bottom: 16px; border-left: 3px solid var(--warn); }
@@ -55,7 +57,7 @@
   input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #msg { min-height: 22px; margin: 14px 2px 0; font-size: 14px; }
   #msg.err { color: var(--danger); }
-  footer { margin-top: 28px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  footer { margin-top: 28px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
   @media (max-width: 480px) {
     li { flex-wrap: wrap; }
     .actions { width: 100%; }
@@ -65,8 +67,11 @@
 <body>
 <main>
   <header>
-    <h1>cswitch</h1>
-    <span class="sub" id="state">loading...</span>
+    <div>
+      <h1>cswitch</h1>
+      <span class="sub" id="state">loading...</span>
+    </div>
+    <button id="quit" class="danger" title="Stop the web UI server and remove the tray icon">Stop server</button>
   </header>
 
   <div class="card banner" id="unmanaged" hidden>
@@ -88,8 +93,8 @@
   <div id="msg" role="status" aria-live="polite"></div>
 
   <footer>
-    <span>Unofficial. Switching restarts Claude.</span>
-    <button id="quit">Stop UI server</button>
+    <span>Unofficial. Switching restarts Claude. The tray icon keeps this server running.</span>
+    <label class="toggle"><input type="checkbox" id="autostart"> Start with Windows</label>
   </footer>
 </main>
 
@@ -120,6 +125,7 @@ function el(tag, props, ...kids) {
 function render(s) {
   $('state').textContent = s.running ? 'Claude is running' : 'Claude is closed';
   $('unmanaged').hidden = s.liveState !== 'unmanaged';
+  $('autostart').checked = !!s.autostart;
   const list = $('list');
   list.replaceChildren();
   if (!s.profiles.length) {
@@ -171,7 +177,9 @@ async function refresh() {
 
 $('addForm').onsubmit = (e) => { e.preventDefault(); run('add', { name: $('addName').value.trim() }).then(() => ($('addName').value = '')); };
 $('importForm').onsubmit = (e) => { e.preventDefault(); run('import', { name: $('importName').value.trim() }); };
+$('autostart').onchange = (e) => run('autostart', { on: e.target.checked });
 $('quit').onclick = async () => {
+  if (!confirm('Stop the cswitch server? The tray icon goes away too. Run "cswitch ui" or open cswitch from the Start menu to start it again.')) return;
   try { await api('quit', {}); } catch {}
   clearInterval(timer);
   document.body.replaceChildren(el('main', {}, el('p', { textContent: 'cswitch UI stopped. You can close this tab.' })));

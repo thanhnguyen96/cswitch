@@ -41,7 +41,13 @@ cswitch ui              # opens http://127.0.0.1:47821
 ```
 
 Or open **cswitch** from the Start menu. The UI server runs hidden in the background, only
-listens on `127.0.0.1`, and stops after 30 idle minutes (`cswitch ui stop` stops it now).
+listens on `127.0.0.1`, and shows a **tray icon** while it runs:
+
+- left-click: open the web UI
+- right-click: switch account, toggle *Start with Windows*, or *Quit cswitch*
+
+It keeps running until you quit it from the tray, press **Stop server** in the web UI, or run
+`cswitch ui stop`. `cswitch autostart on` starts it (tray only, no browser) when you sign in.
 Port taken? `cswitch ui --port 48000`, or set `CSWITCH_PORT` for good.
 
 ## Commands
@@ -54,7 +60,8 @@ Port taken? `cswitch ui --port 48000`, or set `CSWITCH_PORT` for good.
 | `cswitch add <alias>` | new empty profile, log in in the window that opens |
 | `cswitch rename <old> <new>` | rename a profile |
 | `cswitch remove <alias> [-y]` | delete a profile and its saved login |
-| `cswitch ui [--port <n>]` / `cswitch ui stop` | web UI |
+| `cswitch ui [--port <n>]` / `cswitch ui stop` | web UI + tray icon |
+| `cswitch autostart on\|off` | start the tray icon when you sign in to Windows |
 | `cswitch update` | install the latest version (profiles are kept) |
 | `cswitch uninstall [--purge]` | remove cswitch (see below) |
 

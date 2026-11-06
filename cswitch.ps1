@@ -15,15 +15,15 @@
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads BOM-less files as ANSI.
 
 $ErrorActionPreference = 'Stop'
-$Version     = '0.1.0'
+$Version     = '0.2.0'
 $Root        = Join-Path $env:LOCALAPPDATA 'cswitch'
 $Profiles    = Join-Path $Root 'profiles'
 $Shared      = Join-Path $Root 'shared'
 $SharedDirs  = @('claude-code')
 $RepoRaw     = 'https://raw.githubusercontent.com/thanhnguyen96/cswitch'
-$IdleMinutes = 30
 $DefaultPort = 47821
 $UiState     = Join-Path $Root 'ui.json'   # port + token of the running UI server
+$StartupLnk  = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\cswitch.lnk'
 
 # ---------------------------------------------------------------- Claude app
 
@@ -192,6 +192,7 @@ function Get-Status {
         version   = $Version
         running   = (Test-ClaudeRunning)
         liveState = (Get-LiveState)
+        autostart = (Test-Autostart)
         active    = $active
         profiles  = $items
     }
@@ -332,6 +333,8 @@ function Invoke-Uninstall([bool]$purge) {
         [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
         Where-Object { $_ -and $_.TrimEnd('\') -ne (Join-Path $Root 'bin') }) -join ';'), 'User')
     Remove-Item -LiteralPath (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\cswitch.lnk') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StartupLnk -Force -ErrorAction SilentlyContinue
+    Stop-Ui | Out-Null
 
     $rest = @(Get-ProfileNames)
     if ($purge -or $rest.Count -eq 0) {
@@ -435,6 +438,7 @@ function Invoke-UiRequest($client, [int]$port, [string]$token, [byte[]]$html) {
             'import' { $msg = Invoke-Import $b.name }
             'rename' { $msg = Invoke-Rename $b.name $b.newName }
             'remove' { $msg = Invoke-Remove $b.name $true }
+            'autostart' { $msg = Set-Autostart ([bool]$b.on) $port }
             'quit'   { Send-Json $stream 200 @{ message = 'bye' }; return $true }
             default  { Send-Json $stream 404 @{ error = "unknown action '$action'" }; return $false }
         }
@@ -459,8 +463,95 @@ function Get-PortOwner([int]$port) {
     }
 }
 
-# Serve the UI in this process until quit / idle timeout. Used by the hidden background process.
+# ---- autostart (Startup folder shortcut that starts the tray + UI server at logon)
+
+function Test-Autostart { return (Test-Path -LiteralPath $StartupLnk) }
+
+function Set-Autostart([bool]$on, [int]$port) {
+    if (-not $on) {
+        Remove-Item -LiteralPath $StartupLnk -Force -ErrorAction SilentlyContinue
+        return 'cswitch will not start with Windows.'
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $StartupLnk) | Out-Null
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($StartupLnk)
+    $s.TargetPath = 'powershell.exe'
+    $portArg = if ($port -and $port -ne $DefaultPort) { " --port $port" } else { '' }
+    $s.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" ui --no-browser$portArg"
+    $s.Description = 'cswitch tray icon'
+    $s.WindowStyle = 7
+    $s.Save()
+    return 'cswitch will start in the tray when you sign in to Windows.'
+}
+
+# ---- tray icon (lives in the UI server process; quitting it stops the server)
+
+function New-TrayIconImage {
+    $bmp = New-Object Drawing.Bitmap 32, 32
+    $g = [Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'
+    $g.TextRenderingHint = 'AntiAliasGridFit'
+    $g.FillEllipse((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(196, 99, 63))), 0, 0, 31, 31)
+    $font = New-Object Drawing.Font 'Segoe UI', 20, ([Drawing.FontStyle]::Bold), ([Drawing.GraphicsUnit]::Pixel)
+    $sf = New-Object Drawing.StringFormat
+    $sf.Alignment = 'Center'
+    $sf.LineAlignment = 'Center'
+    $g.DrawString('c', $font, [Drawing.Brushes]::White, (New-Object Drawing.RectangleF 0, -2, 32, 32), $sf)
+    $g.Dispose()
+    return [Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+function Invoke-TrayAction([scriptblock]$action) {
+    try {
+        $m = & $action
+        if ($m) { $script:Tray.ShowBalloonTip(3000, 'cswitch', [string]$m, 'Info') }
+    } catch {
+        $script:Tray.ShowBalloonTip(5000, 'cswitch', $_.Exception.Message, 'Error')
+    }
+}
+
+# Rebuilt every time the menu opens, so it always shows the current profiles.
+function Update-TrayMenu($menu) {
+    $menu.Items.Clear()
+    $open = New-Object Windows.Forms.ToolStripMenuItem 'Open cswitch'
+    $open.Font = New-Object Drawing.Font $open.Font, ([Drawing.FontStyle]::Bold)
+    $open.add_Click({ Start-Process $script:UiUrl })
+    [void]$menu.Items.Add($open)
+    [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+
+    $s = $null
+    try { $s = Get-Status } catch { }
+    if ($s -and $s.profiles.Count) {
+        $hdr = New-Object Windows.Forms.ToolStripMenuItem ($(if ($s.running) { 'Claude is running' } else { 'Claude is closed' }))
+        $hdr.Enabled = $false
+        [void]$menu.Items.Add($hdr)
+        foreach ($p in $s.profiles) {
+            $label = $p.name
+            if (-not $p.loggedIn) { $label += '  (not logged in)' }
+            $it = New-Object Windows.Forms.ToolStripMenuItem $label
+            $it.Checked = [bool]$p.active
+            $it.Tag = $p.name
+            $it.add_Click({ $n = $this.Tag; Invoke-TrayAction { Invoke-Switch $n } })
+            [void]$menu.Items.Add($it)
+        }
+    } else {
+        $none = New-Object Windows.Forms.ToolStripMenuItem 'No profiles yet - open cswitch'
+        $none.Enabled = $false
+        [void]$menu.Items.Add($none)
+    }
+    [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+
+    $auto = New-Object Windows.Forms.ToolStripMenuItem 'Start with Windows'
+    $auto.Checked = Test-Autostart
+    $auto.add_Click({ $on = -not (Test-Autostart); Invoke-TrayAction { Set-Autostart $on $script:UiPort } })
+    [void]$menu.Items.Add($auto)
+    $quit = New-Object Windows.Forms.ToolStripMenuItem 'Quit cswitch'
+    $quit.add_Click({ $script:UiQuit = $true })
+    [void]$menu.Items.Add($quit)
+}
+
+# Serve the UI in this process, with a tray icon, until quit. Used by the hidden background process.
 function Start-UiServer([int]$port) {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $token = [guid]::NewGuid().ToString('N')
     # Embedding the token in the page is safe: other sites cannot read our pages
     # (same-origin policy + Host check), so only a page we served can call the API.
@@ -470,21 +561,46 @@ function Start-UiServer([int]$port) {
     try { $listener.Start() } catch { throw "Port $port is already in use. Pick another: cswitch ui --port <n>" }
     New-Item -ItemType Directory -Force -Path $Root | Out-Null
     ConvertTo-Json @{ port = $port; token = $token; pid = $PID } | Set-Content -LiteralPath $UiState -Encoding ascii
-    $last = Get-Date
-    try {
-        while ($true) {
-            if (-not $listener.Pending()) {
-                if (((Get-Date) - $last).TotalMinutes -ge $IdleMinutes) { break }
-                Start-Sleep -Milliseconds 100   # polling keeps Ctrl+C responsive
-                continue
+
+    $script:UiPort = $port
+    $script:UiUrl = Get-UiUrl $port
+    $script:UiQuit = $false
+    $script:Tray = New-Object Windows.Forms.NotifyIcon
+    $script:Tray.Icon = New-TrayIconImage
+    $script:Tray.Text = "cswitch - $($script:UiUrl)"
+    $menu = New-Object Windows.Forms.ContextMenuStrip
+    Update-TrayMenu $menu
+    # An empty strip opens with Cancel = true; we always refill it, so let it open.
+    $menu.add_Opening({ param($s, $e) Update-TrayMenu $s; $e.Cancel = $false })
+    $script:Tray.ContextMenuStrip = $menu
+    $script:Tray.add_MouseClick({ param($s, $e) if ($e.Button -eq 'Left') { Start-Process $script:UiUrl } })
+    $script:Tray.Visible = $true
+
+    # A WinForms timer runs on the tray's message loop, so HTTP requests and menu clicks
+    # never run at the same time.
+    $script:UiListener = $listener
+    $script:UiToken = $token
+    $script:UiHtml = $html
+    $script:UiTimer = New-Object Windows.Forms.Timer
+    $script:UiTimer.Interval = 100
+    $script:UiTimer.add_Tick({
+        if (-not $script:UiQuit) {
+            while ($script:UiListener.Pending()) {
+                $client = $script:UiListener.AcceptTcpClient()
+                try {
+                    if (Invoke-UiRequest $client $script:UiPort $script:UiToken $script:UiHtml) { $script:UiQuit = $true }
+                } catch { } finally { $client.Close() }
             }
-            $client = $listener.AcceptTcpClient()
-            $last = Get-Date
-            $quit = $false
-            try { $quit = Invoke-UiRequest $client $port $token $html } catch { } finally { $client.Close() }
-            if ($quit) { break }
         }
+        if ($script:UiQuit) { $script:UiTimer.Stop(); [Windows.Forms.Application]::ExitThread() }
+    })
+    try {
+        $script:UiTimer.Start()
+        [Windows.Forms.Application]::Run()
     } finally {
+        $script:UiTimer.Dispose()
+        $script:Tray.Visible = $false
+        $script:Tray.Dispose()
         $listener.Stop()
         Remove-Item -LiteralPath $UiState -Force -ErrorAction SilentlyContinue
     }
@@ -507,7 +623,7 @@ function Open-Ui([int]$port, [bool]$noBrowser) {
         }
     }
     if (-not $noBrowser) { Start-Process $url }
-    return "cswitch web UI: $url  (stops after $IdleMinutes idle minutes; cswitch ui stop to stop now)"
+    return "cswitch web UI: $url  (tray icon: right-click > Quit, or cswitch ui stop)"
 }
 
 function Stop-Ui {
@@ -563,7 +679,8 @@ cswitch $Version - switch Claude Desktop accounts without logging out (unofficia
   cswitch rename <old> <new>      rename a profile
   cswitch remove <alias> [-y]     delete a profile and its saved login
   cswitch ui [--port <n>]         open the web UI (http://127.0.0.1:$DefaultPort)
-  cswitch ui stop                 stop the web UI server
+  cswitch ui stop                 stop the web UI server and its tray icon
+  cswitch autostart on|off        start the tray icon when you sign in to Windows
   cswitch update                  install the latest version
   cswitch uninstall [--purge]     remove cswitch (--purge also deletes all profiles)
 
@@ -598,6 +715,12 @@ try {
             if ($pos[0] -eq 'stop') { Write-Output (Stop-Ui); break }
             Get-ClaudePackage | Out-Null
             Write-Output (Open-Ui (Get-UiPort $rest) ($rest -contains '--no-browser'))
+            break
+        }
+        'autostart' {
+            if ($pos[0] -eq 'on') { Write-Output (Set-Autostart $true (Get-UiPort $rest)) }
+            elseif ($pos[0] -eq 'off') { Write-Output (Set-Autostart $false 0) }
+            else { Write-Output ('autostart: ' + $(if (Test-Autostart) { 'on' } else { 'off' }) + '   (cswitch autostart on|off)') }
             break
         }
         '__serve' { Start-UiServer ([int]$pos[0]); break }

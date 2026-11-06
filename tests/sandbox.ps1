@@ -16,6 +16,9 @@ New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:USERPROFILE | Out-N
 
 $fail = 0
 function Has($out, $pattern) { return [bool](@($out) -match $pattern).Count }
+function Get-PortState($port) {
+    if (@(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).Count) { 'used' } else { 'free' }
+}
 function Check($name, [bool]$ok) {
     if ($ok) { Write-Host "  ok   $name" } else { Write-Host "  FAIL $name" -ForegroundColor Red; $script:fail++ }
 }
@@ -46,7 +49,7 @@ try {
 
     & $cs add b | Out-Null
     Check 'add: b active' ("$((Get-Item $live -Force).Target)" -like '*profiles\b')
-    Check 'add: b not logged in' (Has (& $cs list) 'b\s+\[active\] \[not logged in\]')
+    Check 'add: b not logged in' (Has (& $cs list) 'b\s+\[active(, running)?\] \[not logged in\]')
 
     & $cs a | Out-Null
     Check 'switch: a active' (Has (& $cs list) '^\* a')
@@ -71,9 +74,19 @@ try {
     Check 'ui: switch' ($r.status.active -eq 'a')
     $r = Invoke-RestMethod "$u/api/remove" -Method Post -Headers $h -Body '{"name":"d"}'
     Check 'ui: remove' (@($r.status.profiles).Count -eq 1)
+    $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\cswitch.lnk'
+    $r = Invoke-RestMethod "$u/api/autostart" -Method Post -Headers $h -Body '{"on":true}'
+    Check 'ui: autostart on' ($r.status.autostart -and (Test-Path $startup))
+    $r = Invoke-RestMethod "$u/api/autostart" -Method Post -Headers $h -Body '{"on":false}'
+    Check 'ui: autostart off' (-not $r.status.autostart -and -not (Test-Path $startup))
+    Check 'ui: server stays up' ((Get-Process -Id ((Get-Content (Join-Path $root 'ui.json') -Raw | ConvertFrom-Json).pid) -ErrorAction SilentlyContinue) -ne $null)
     $code = try { Invoke-WebRequest "$u/api/status" -UseBasicParsing | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
     Check 'ui: no token -> 403' ($code -eq 403)
     & $cs ui stop | Out-Null
+    Start-Sleep -Milliseconds 500
+    Check 'ui stop: server gone' ((Get-PortState $env:CSWITCH_PORT) -eq 'free')
+    Check 'cli: autostart on' ((Has (& $cs autostart on) 'start in the tray') -and (Test-Path $startup))
+    Check 'cli: autostart off' ((Has (& $cs autostart off) 'not start') -and -not (Test-Path $startup))
 
     Check 'update' (Has (& $cs update) 'installed')
     Check 'update keeps profiles' (Has (& $cs list) '^\* a')

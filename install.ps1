@@ -34,6 +34,12 @@
             }
         }
         New-Item -ItemType Directory -Force -Path $app, $bin | Out-Null
+        # A running UI server / tray icon still uses the old files: stop it now, restart it below.
+        $uiWasRunning = $false
+        if ((Test-Path (Join-Path $root 'ui.json')) -and (Test-Path (Join-Path $app 'cswitch.ps1'))) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'cswitch.ps1') ui stop | Out-Null
+            $uiWasRunning = $true
+        }
         foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $tmp $f) -Destination (Join-Path $app $f) -Force }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -66,6 +72,7 @@
     & powershell -NoProfile -ExecutionPolicy Bypass -File $main __postinstall
     $v = & powershell -NoProfile -ExecutionPolicy Bypass -File $main version
     $port = if ($env:CSWITCH_PORT) { $env:CSWITCH_PORT } else { '47821' }
+    if ($uiWasRunning) { & powershell -NoProfile -ExecutionPolicy Bypass -File $main ui --no-browser | Out-Null }
 
     Write-Host ''
     Write-Host "cswitch $v installed." -ForegroundColor Green
@@ -73,6 +80,9 @@
     Write-Host '  Web UI'
     Write-Host "    cswitch ui              then open http://127.0.0.1:$port"
     Write-Host "    or Start menu > cswitch"
+    Write-Host '    a tray icon appears while it runs: left-click opens the UI,'
+    Write-Host '    right-click switches account or quits'
+    Write-Host '    cswitch autostart on    start the tray icon with Windows'
     Write-Host ''
     Write-Host '  Terminal'
     Write-Host '    cswitch list            show profiles'
