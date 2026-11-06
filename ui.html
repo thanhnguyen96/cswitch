@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cswitch</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --text: #1d1c1a; --muted: #6b6862; --line: #e3e0da;
+    --accent: #c4633f; --accent-text: #ffffff; --ok: #2f7d4f; --warn: #a3611a; --danger: #b3261e;
+    --chip: #efece6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1918; --card: #242321; --text: #ecebe8; --muted: #a29f98; --line: #36342f;
+      --accent: #d97757; --accent-text: #1a1918; --ok: #6cc28f; --warn: #e0a458; --danger: #f2867e;
+      --chip: #2f2d2a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .banner { padding: 14px 16px; margin-bottom: 16px; border-left: 3px solid var(--warn); }
+  .banner p { margin: 0 0 10px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+  .tag.active { color: var(--ok); }
+  .tag.warn { color: var(--warn); }
+  .actions { display: flex; gap: 6px; }
+  .empty { padding: 20px 16px; color: var(--muted); }
+  button {
+    font: inherit; font-size: 13px; border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--text);
+  }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: progress; }
+  form { display: flex; gap: 8px; padding: 14px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  input {
+    flex: 1; min-width: 160px; font: inherit; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #msg { min-height: 22px; margin: 14px 2px 0; font-size: 14px; }
+  #msg.err { color: var(--danger); }
+  footer { margin-top: 28px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  @media (max-width: 480px) {
+    li { flex-wrap: wrap; }
+    .actions { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>cswitch</h1>
+    <span class="sub" id="state">loading...</span>
+  </header>
+
+  <div class="card banner" id="unmanaged" hidden>
+    <p>Claude's current login isn't saved in a profile yet. Save it before adding or switching.</p>
+    <form id="importForm" style="border:0;padding:0">
+      <input id="importName" placeholder="alias for the current account" autocomplete="off" required>
+      <button class="primary">Save current login</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <ul id="list"></ul>
+    <form id="addForm">
+      <input id="addName" placeholder="new profile alias" autocomplete="off" required>
+      <button>Add &amp; log in</button>
+    </form>
+  </div>
+
+  <div id="msg" role="status" aria-live="polite"></div>
+
+  <footer>
+    <span>Unofficial. Switching restarts Claude.</span>
+    <button id="quit">Stop UI server</button>
+  </footer>
+</main>
+
+<script>
+const token = '__CSWITCH_TOKEN__';   // filled in by the cswitch server
+const $ = (id) => document.getElementById(id);
+let busy = false;
+
+function say(text, isErr) { $('msg').textContent = text || ''; $('msg').className = isErr ? 'err' : ''; }
+
+async function api(action, body) {
+  const res = await fetch('/api/' + action, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'X-Cswitch-Token': token, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({ error: 'Bad response from cswitch.' }));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function el(tag, props, ...kids) {
+  const n = Object.assign(document.createElement(tag), props);
+  kids.forEach((k) => n.append(k));
+  return n;
+}
+
+function render(s) {
+  $('state').textContent = s.running ? 'Claude is running' : 'Claude is closed';
+  $('unmanaged').hidden = s.liveState !== 'unmanaged';
+  const list = $('list');
+  list.replaceChildren();
+  if (!s.profiles.length) {
+    list.append(el('li', { className: 'empty', textContent: 'No profiles yet.' }));
+    return;
+  }
+  for (const p of s.profiles) {
+    const tags = el('span', { className: 'tags' });
+    if (p.active) tags.append(el('span', { className: 'tag active', textContent: 'active' }));
+    if (!p.loggedIn) tags.append(el('span', { className: 'tag warn', textContent: 'not logged in' }));
+    const actions = el('span', { className: 'actions' });
+    if (!p.active || !s.running) {
+      actions.append(el('button', { className: 'primary', textContent: p.active ? 'Open' : 'Switch',
+        onclick: () => run('switch', { name: p.name }) }));
+    }
+    actions.append(el('button', { textContent: 'Rename', onclick: () => {
+      const newName = prompt('New alias for "' + p.name + '"', p.name);
+      if (newName && newName !== p.name) run('rename', { name: p.name, newName });
+    } }));
+    actions.append(el('button', { className: 'danger', textContent: 'Delete', onclick: () => {
+      if (confirm('Delete "' + p.name + '" and its saved login? This cannot be undone.')) run('remove', { name: p.name });
+    } }));
+    list.append(el('li', {}, el('span', { className: 'name', textContent: p.name }), tags, actions));
+  }
+}
+
+async function run(action, body) {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  say('Working...');
+  try {
+    const r = await api(action, body);
+    say(r.message);
+    if (r.status) render(r.status);
+  } catch (e) {
+    say(e.message, true);
+  } finally {
+    busy = false;
+    document.querySelectorAll('button').forEach((b) => (b.disabled = false));
+  }
+}
+
+async function refresh() {
+  if (busy || document.hidden) return;
+  try { render(await api('status')); }
+  catch (e) { $('state').textContent = 'UI server stopped'; say('Run "cswitch ui" again to reopen.', true); clearInterval(timer); }
+}
+
+$('addForm').onsubmit = (e) => { e.preventDefault(); run('add', { name: $('addName').value.trim() }).then(() => ($('addName').value = '')); };
+$('importForm').onsubmit = (e) => { e.preventDefault(); run('import', { name: $('importName').value.trim() }); };
+$('quit').onclick = async () => {
+  try { await api('quit', {}); } catch {}
+  clearInterval(timer);
+  document.body.replaceChildren(el('main', {}, el('p', { textContent: 'cswitch UI stopped. You can close this tab.' })));
+};
+
+const timer = setInterval(refresh, 4000);
+refresh();
+</script>
+</body>
+</html>
